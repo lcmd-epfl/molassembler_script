@@ -6,4 +6,4 @@ The provided snippet requires several [SCINE](https://scine.ethz.ch/download/) m
 
 The script is pointed towards templates via the `templatepath` variable, and writes results to the `newpath` variable path. It systematically replaces the bare Cp ligand in the template with the (Cp-containing) molecule provided in `func_smiles`. It then attempts to generate `nconfs` conformers (50 by default) and saves them in `newpath`.
 
-This is intended to serve as an example that can be adapted to use the Molassembler library for other (similar) purposes. 
+This is intended to serve as an example that can be adapted to use the Molassembler library for other (similar) purposes. An example of such adaptation is given by the `phosphine_conformer_generator.py`, which is significantly simpler and generates conformer samples for exemplary Buchwald phosphine Pd complexes.

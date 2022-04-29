@@ -9,6 +9,8 @@ import glob
 from typing import Optional, Tuple, List, Iterable, Dict, Callable, Union
 from functools import partial
 from collections import defaultdict
+
+
 from householding import Householder
 
 """
@@ -25,16 +27,29 @@ Overview
 
 # Main variables to set up the structure generation
 templatepath = "templates/UR.xyz"
-newpath = "results/UR.xyz"
+newpath = "UR.xyz"
 nconfs = 50
+CENTRAL_ELEMENT = su.ElementType.Rh
+
+# Approximate coordinates of the metal center in the template, useful to define clockwise/counterclockwise angles
+ref_coords = [-1.5, -2, 0]
+MaybePredicate = Optional[Callable[[su.AtomCollection], bool]]
+
+# Indices to define either an angle (3 indices) or a dihedral (4 indices) to keep track of axial chirality. Can be None if not needed.
+idxs = None  # e.g. [31, 32, 33] # [6, 17, 18, 29]
+# Direction can be True or False to switch the direction (axial chirality) of the attachment of the Cp
+direction = True
+
+
 # The SMILES in this string will be used to replace Cp in the template. Must contain a Cp-like structure.
 func_smiles = (
     "c12c[cH-]cc1[C@H](C)[C@H]3OC(c1ccccc1)(c1ccccc1)O[C@@H]3[C@@H]2(C)"  # Catalyst 1
 )
-CENTRAL_ELEMENT = su.ElementType.Rh
-# If calculating the pseudodihedrals is relevant
-calculate_pd = False
-MaybePredicate = Optional[Callable[[su.AtomCollection], bool]]
+
+# Options to functionalize other positions of the Cp ring, in case the SMILES is not convenient
+tip_smiles = None
+tip_atom = su.ElementType.C
+cindex_choice = 2
 
 
 def is_flat_carbon(idx: int, mol: masm.Molecule) -> bool:
@@ -111,7 +126,7 @@ class StableIndexManager:
 
 
 def find_cyclopentadienyl_site(mol: masm.Molecule) -> Optional[Tuple[int, int]]:
-    """ Returns atom index and site index pair """
+    """Returns atom index and site index pair"""
     flat_carbon = partial(is_flat_carbon, mol=mol)
 
     for permutator in mol.stereopermutators.atom_stereopermutators():
@@ -123,13 +138,13 @@ def find_cyclopentadienyl_site(mol: masm.Molecule) -> Optional[Tuple[int, int]]:
 
 
 class Pseudodihedral:
-    """ Class for calculating rotation of a substituted cyclopentadienyl """
+    """Class for calculating rotation of a substituted cyclopentadienyl"""
 
     Sequence = List[Union[int, List[int]]]
     definition: Sequence
 
     def __init__(self, mol: masm.Molecule):
-        """ Find a working definition of the pseudodihedral """
+        """Find a working definition of the pseudodihedral"""
         maybe_atom_site_pair = find_cyclopentadienyl_site(mol)
         if not maybe_atom_site_pair:
             raise RuntimeError("Couldn't find Cp for pseudodihedral")
@@ -170,7 +185,7 @@ class Pseudodihedral:
         self.definition = [first, second, third, fourth]
 
     def __call__(self, ac: su.AtomCollection) -> float:
-        """ Returns a calculated dihedral in radians in [-pi, pi) """
+        """Returns a calculated dihedral in radians in [-pi, pi)"""
 
         def average(ac: su.AtomCollection, x: Union[int, List[int]]) -> np.ndarray:
             if isinstance(x, int):
@@ -183,7 +198,7 @@ class Pseudodihedral:
 
     @staticmethod
     def dihedral_angle(p: np.ndarray) -> float:
-        """ Calculates the dihedral between four points """
+        """Calculates the dihedral between four points"""
         b0 = -1.0 * (p[1] - p[0])
         b1 = p[2] - p[1]
         b2 = p[3] - p[2]
@@ -196,6 +211,21 @@ class Pseudodihedral:
         x = np.dot(v, w)
         y = np.dot(np.cross(b1, v), w)
         return np.arctan2(y, x)
+
+    @staticmethod
+    def normal_angle(p: np.ndarray, ref: np.ndarray) -> float:
+        """Calculates the angle between three points"""
+        b0 = p[0] - p[1]
+        b1 = p[2] - p[1]
+        b0 /= np.linalg.norm(b0)
+        b1 /= np.linalg.norm(b1)
+        x = np.dot(b0, b1)
+        w = ref - p[1]
+
+        w /= np.linalg.norm(w)
+        y = np.dot(w, np.cross(b0, b1))
+        a = np.arctan2(y, x)
+        return a
 
 
 def fixed_atoms(mol: masm.Molecule) -> List[int]:
@@ -266,6 +296,44 @@ def substitute_cp(
 
     central = split.graph.atoms_of_element(anchor_element)[0]
     complete = masm.editing.add_ligand(split, ligand, central, ligand_cp_atoms)
+
+    # Tip and other substitutions if desired
+    if tip_smiles is not None:
+        adj_h = []
+        g = complete.graph
+        ligand_cp_atoms = find_cyclopentadienyl(complete)
+        for idx, ligand_cp_atom in enumerate(ligand_cp_atoms[:]):
+            if idx == cindex_choice:
+                for adj in g.adjacents(ligand_cp_atoms[idx]):
+                    if (
+                        g.element_type(adj) == su.ElementType.C
+                        and adj not in ligand_cp_atoms[:]
+                    ):
+                        continue
+                    if g.element_type(adj) == su.ElementType.H and g.can_remove(adj):
+                        tip = Ligand(tip_smiles, "Tip")
+                        tipg = tip.mol.graph
+                        for catm in tipg.atoms_of_element(tip_atom):
+                            counter = 0
+                            for cadj in tipg.adjacents(catm):
+                                if tipg.element_type(cadj) == su.ElementType.C:
+                                    counter += 1
+                                elif tipg.element_type(
+                                    cadj
+                                ) == su.ElementType.H and tipg.can_remove(cadj):
+                                    hindex = cadj
+                            if counter == 3:
+                                cindex = catm
+                                break
+                        try:
+                            complete = masm.editing.substitute(
+                                complete,
+                                tip.mol,
+                                masm.BondIndex(ligand_cp_atoms[idx], adj),
+                                masm.BondIndex(cindex, hindex),
+                            )
+                        except IndexError as m:
+                            raise IndexError(m)
     ligand_index_map = {i: split.graph.V + i for i in ligand.graph.atoms()}
     return TrackedSubstitution(complete, partial_positions, ligand_index_map)
 
@@ -319,6 +387,7 @@ def cg_ensemble(mol: masm.Molecule, config: masm.dg.Configuration) -> List[np.ar
                 f"Generated only {len(confs)} confs: see failed-ensemble.svg"
             )
 
+        # masm.io.write("check.svg", mol)
         return confs
     except RuntimeError as e:
         masm.io.write("problem-child.svg", mol)
@@ -388,9 +457,40 @@ class DihedralPredicate:
         return dihedral > 0 if self.positive else dihedral < 0
 
 
+class AnglePredicate:
+    sequence: List[int]
+    positive: bool
+
+    def __init__(self, sequence: List[int], positive: bool):
+        self.sequence = sequence
+        self.positive = positive
+
+    def __call__(self, ac: su.AtomCollection) -> bool:
+        positions = np.array([ac.get_position(i) for i in self.sequence])
+        angle = Pseudodihedral.normal_angle(positions, np.array(ref_coords))
+        return angle > 0 if self.positive else angle < 0
+
+
 def iter_ligands() -> Iterable[Ligand]:
     """Cp ligands in SMILES format"""
-    cp_replacements = [Ligand(func_smiles, "ModifiedLigand")]
+    if idxs is None:
+        cp_replacements = [Ligand(func_smiles, "ModifiedLigand")]
+    elif direction is not None and len(idxs) == 4:
+        cp_replacements = [
+            Ligand(
+                func_smiles,
+                "ModifiedLigand",
+                DihedralPredicate([idxs[3], idxs[2], idxs[1], idxs[0]], direction),
+            )
+        ]
+    elif direction is not None and len(idxs) == 3:
+        cp_replacements = [
+            Ligand(
+                func_smiles,
+                "ModifiedLigand",
+                AnglePredicate([idxs[0], idxs[1], idxs[2]], direction),
+            )
+        ]
     for ligand in cp_replacements:
         yield ligand
 
@@ -416,62 +516,62 @@ def peek():
 
 
 # Unused functions meant to perform the optimization fully using SCINE
-def xtb_minimize(
-    substitution: TrackedSubstitution, ac: su.AtomCollection
-) -> su.AtomCollection:
-    import scine_xtb
-
-    manager = su.core.ModuleManager()
-    calculator = manager.get("calculator", "GFN2")
-    if not calculator:
-        raise RuntimeError("No calculator for XTB")
-
-    assert isinstance(calculator, su.core.Calculator)
-    calculator.structure = ac
-    log = su.core.Log()
-
-    optimizer = su.Optimizer.SteepestDescent
-    settings = su.geometry_optimization_settings(calculator, optimizer)
-    settings.update(
-        {
-            "convergence_max_iterations": 1000,
-            "geoopt_transform_coordinates": False,
-            "geoopt_coordinate_system": "cartesian",
-            "geoopt_constrained_atoms": substitution.fixed_first_shell,
-        }
-    )
-    return su.geometry_optimize(calculator, log, optimizer, settings=settings)
-
-
-def make_tsopt(
-    structure: db.Structure, substituted: TrackedSubstitution, householder: Householder
-) -> db.Calculation:
-    TSOPT_SETTINGS = {
-        "convergence_max_iterations": 1000,
-        "geoopt_coordinate_system": "cartesian",
-        "geoopt_constrained_atoms": substituted.fixed_first_shell,
-        "optimizer": "dimer",
-    }
-    calculation = householder.make_ts_optimization(structure)
-    for k, v in TSOPT_SETTINGS.items():
-        calculation.set_setting(k, v)
-    return calculation
-
-
-def make_geoopt(
-    structure: db.Structure, substituted: TrackedSubstitution, householder: Householder
-) -> db.Calculation:
-    GEOOPT_SETTINGS = {
-        "convergence_max_iterations": 1000,
-        "bfgs_use_trust_radius": True,
-        "bfgs_trust_radius": 0.3,
-        "geoopt_coordinate_system": "bofill",
-        "geoopt_constrained_atoms": substituted.fixed_first_shell,
-    }
-    calculation = householder.make_structure_optimization(structure)
-    for k, v in GEOOPT_SETTINGS.items():
-        calculation.set_setting(k, v)
-    return calculation
+# def xtb_minimize(
+#    substitution: TrackedSubstitution, ac: su.AtomCollection
+# ) -> su.AtomCollection:
+#    import scine_xtb
+#
+#    manager = su.core.ModuleManager()
+#    calculator = manager.get("calculator", "GFN2")
+#    if not calculator:
+#        raise RuntimeError("No calculator for XTB")
+#
+#    assert isinstance(calculator, su.core.Calculator)
+#    calculator.structure = ac
+#    log = su.core.Log()
+#
+#    optimizer = su.Optimizer.SteepestDescent
+#    settings = su.geometry_optimization_settings(calculator, optimizer)
+#    settings.update(
+#        {
+#            "convergence_max_iterations": 1000,
+#            "geoopt_transform_coordinates": False,
+#            "geoopt_coordinate_system": "cartesian",
+#            "geoopt_constrained_atoms": substitution.fixed_first_shell,
+#        }
+#    )
+#    return su.geometry_optimize(calculator, log, optimizer, settings=settings)
+#
+#
+# def make_tsopt(
+#    structure: db.Structure, substituted: TrackedSubstitution, householder: Householder
+# ) -> db.Calculation:
+#    TSOPT_SETTINGS = {
+#        "convergence_max_iterations": 1000,
+#        "geoopt_coordinate_system": "cartesian",
+#        "geoopt_constrained_atoms": substituted.fixed_first_shell,
+#        "optimizer": "dimer",
+#    }
+#    calculation = householder.make_ts_optimization(structure)
+#    for k, v in TSOPT_SETTINGS.items():
+#        calculation.set_setting(k, v)
+#    return calculation
+#
+#
+# def make_geoopt(
+#    structure: db.Structure, substituted: TrackedSubstitution, householder: Householder
+# ) -> db.Calculation:
+#    GEOOPT_SETTINGS = {
+#        "convergence_max_iterations": 1000,
+#        "bfgs_use_trust_radius": True,
+#        "bfgs_trust_radius": 0.3,
+#        "geoopt_coordinate_system": "bofill",
+#        "geoopt_constrained_atoms": substituted.fixed_first_shell,
+#    }
+#    calculation = householder.make_structure_optimization(structure)
+#    for k, v in GEOOPT_SETTINGS.items():
+#        calculation.set_setting(k, v)
+#    return calculation
 
 
 def initialize(householder: Householder):
@@ -499,13 +599,6 @@ def initialize(householder: Householder):
                     destination = filename.replace(f"{templatepath}", f"{newpath}")
                     su.io.write(destination.replace(".xyz", f"-{j}.xyz"), conf)
 
-            # Calculate pseudodihedral for all structures if relevant
-            if calculate_pd:
-                pseudodihedral = Pseudodihedral(substituted.mol)
-                for structure, conf in zip(structures, ensemble):
-                    pseudodihedral_value = pseudodihedral(conf)
-                    destination = filename.replace(f"{templatepath}", f"{newpath}")
-
             # Link up a compound of all these structures
             householder.make_compound(structures)
 
@@ -524,6 +617,6 @@ def initialize(householder: Householder):
 
 if __name__ == "__main__":
     creds = db.Credentials()
-    creds.database_name = "nccr"
+    creds.database_name = "Molassembler"
     householder = Householder(creds, wipe=True)
     initialize(householder)
