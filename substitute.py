@@ -574,6 +574,40 @@ def peek():
 #    return calculation
 
 
+def generate_gaussian_inputfile(filename):
+    ginput_filename = filename.replace(".xyz", ".com")
+    with open(filename, "r") as f:
+        coords = "".join(f.readlines()[2:])
+    chkname = filename.replace(".xyz", ".chk")
+
+    before = f"""%chk={chkname}
+# opt=(calcfc, ts, noeigentest,maxstep=20) freq=noraman external=\"xtb-gaussian --alpb Methanol\" IOP(1/18=20) IOP(1/6=500)
+
+{filename}
+
+0 1
+"""
+
+    after = f"""
+--Link 1--
+%chk={chkname}
+%mem=25000mb
+%nprocshared=8
+# opt=(calfc, ts, noeigentest,maxstep=20) B3PW91/def2svp empiricaldispersion=gd3bj freq geom=allcheck
+
+--Link 1--
+%mem=25000mb
+%nprocshared=8
+%chk={chkname}
+# B3P91/def2TZVP empiricaldispersion=gd3bj guess=read geom=allcheck scrf=(smd,solvent=ethanol)
+"""
+
+    with open(ginput_filename, "w+") as f:
+        f.write(before)
+        f.write(coords)
+        f.write(after)
+
+
 def initialize(householder: Householder):
     """Generate the initial set of structures and calculations"""
     for filename, ac in iter_structures():
@@ -597,7 +631,9 @@ def initialize(householder: Householder):
             if True:
                 for j, conf in enumerate(ensemble):
                     destination = filename.replace(f"{templatepath}", f"{newpath}")
-                    su.io.write(destination.replace(".xyz", f"-{j}.xyz"), conf)
+                    output_filename = destination.replace(".xyz", f"-{j}.xyz")
+                    su.io.write(output_filename, conf)
+                    generate_gaussian_inputfile(output_filename)
 
             # Link up a compound of all these structures
             householder.make_compound(structures)
