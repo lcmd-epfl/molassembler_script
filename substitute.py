@@ -581,7 +581,7 @@ def generate_gaussian_inputfile(filename):
     chkname = filename.replace(".xyz", ".chk")
 
     before = f"""%chk={chkname}
-# opt=(calcfc, ts, noeigentest,maxstep=20) freq=noraman external=\"xtb-gaussian --alpb Methanol\" IOP(1/18=20) IOP(1/6=500)
+# opt=(calcfc, ts, noeigentest,maxstep=20, loose) freq=noraman external=\"xtb-gaussian --alpb Methanol\" IOP(1/18=20) IOP(1/6=500)
 
 {filename}
 
